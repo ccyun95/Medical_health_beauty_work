@@ -356,6 +356,7 @@ def emit_per_ticker_json(companies, rows_limit=None):
 
 def emit_index_html(companies, rows_limit=None):
     import html as _html
+    from string import Template  # ← f-string 중괄호 이스케이프 문제 방지를 위해 Template 사용
     docs_dir = Path(os.getenv("GITHUB_WORKSPACE", ".")) / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -383,6 +384,18 @@ def emit_index_html(companies, rows_limit=None):
             "<tr>" + "".join(f"<td>{_html.escape(v)}</td>" for v in row) + "</tr>" for row in rows
         )
         sec_id = f"{name}_{str(ticker).zfill(6)}"
+
+        # 🔹 차트용 섹션별 inline JSON (CORS 회피, 기존 구조/주석 유지)
+        payload = {
+            "name": name,
+            "ticker": str(ticker).zfill(6),
+            "columns": [str(c).strip() for c in columns],  # 안전: 컬럼명 trim
+            "rows": rows,  # 문자열 그대로(표와 동일 소스)
+        }
+        json_raw = json.dumps(payload, ensure_ascii=False)
+        json_safe = json_raw.replace("</", "<\\/")  # </script> 차단
+
+        # 🔹 표 + 차트 2개(세로 스택) + 섹션별 데이터 스크립트
         sections.append(f"""
 <section id="{_html.escape(sec_id)}">
   <h2>{_html.escape(name)} ({str(ticker).zfill(6)})</h2>
@@ -395,6 +408,13 @@ def emit_index_html(companies, rows_limit=None):
     </table>
   </div>
   <p class="meta">rows: {len(rows)} · source: data/{_html.escape(csv_path.name)} · json: api/{_html.escape(sec_id)}.json</p>
+
+  <div class="charts">
+    <div id="chart-price-{_html.escape(sec_id)}" class="chart"></div>
+    <div id="chart-flow-{_html.escape(sec_id)}" class="chart"></div>
+  </div>
+
+  <script id="data-{_html.escape(sec_id)}" type="application/json">{json_safe}</script>
 </section>""")
 
     def _id_from(sec_html: str) -> str:
@@ -405,7 +425,8 @@ def emit_index_html(companies, rows_limit=None):
 
     nav = "".join(f'<a href="#{_id_from(s)}">{_id_from(s)}</a>' for s in sections)
 
-    html_doc = f"""<!doctype html>
+    # 🔹 2개 차트(가격/지표, 수급/공매도)를 그리는 스크립트 포함
+    html_template = Template("""<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
@@ -414,34 +435,183 @@ def emit_index_html(companies, rows_limit=None):
 <meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KRX 기업별 데이터 테이블</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
-  body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }}
-  header {{ margin-bottom: 20px; }}
-  .meta-top {{ color:#666; font-size:14px; }}
-  .nav {{ display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:8px; }}
-  .nav a {{ font-size:13px; text-decoration:none; color:#2563eb; }}
-  section {{ margin: 32px 0; }}
-  h2 {{ font-size: 18px; margin: 12px 0; }}
-  .scroll {{ overflow:auto; max-height: 60vh; border:1px solid #e5e7eb; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
-  th, td {{ border: 1px solid #e5e7eb; padding: 6px 8px; text-align: right; }}
-  th:first-child, td:first-child {{ text-align: left; white-space: nowrap; }}
-  thead th {{ position: sticky; top:0; background:#fafafa; }}
-  .meta {{ color:#666; font-size:12px; }}
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+  header { margin-bottom: 20px; }
+  .meta-top { color:#666; font-size:14px; }
+  .nav { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:8px; }
+  .nav a { font-size:13px; text-decoration:none; color:#2563eb; }
+  section { margin: 32px 0; }
+  h2 { font-size: 18px; margin: 12px 0; }
+  .scroll { overflow:auto; max-height: 60vh; border:1px solid #e5e7eb; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; white-space: nowrap; }
+  thead th { position: sticky; top:0; background:#fafafa; }
+  .meta { color:#666; font-size:12px; }
+  .charts { width: 100%; display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+  .chart { width: 100%; height: 560px; border:1px solid #e5e7eb; }
 </style>
 </head>
 <body>
 <header>
   <h1>KRX 기업별 데이터 테이블</h1>
-  <div class="meta-top">생성 시각: {generated} · 타임존: Asia/Seoul</div>
-  <nav class="nav">{nav}</nav>
+  <div class="meta-top">생성 시각: $generated · 타임존: Asia/Seoul</div>
+  <nav class="nav">$nav</nav>
 </header>
-{''.join(sections) if sections else '<p>표시할 데이터가 없습니다.</p>'}
+
+$sections
+
+<script>
+// ===== 유틸 =====
+function SMA(arr,n){const o=Array(arr.length).fill(null);let s=0,q=[];for(let i=0;i<arr.length;i++){const v=+arr[i]||0;q.push(v);s+=v;if(q.length>n)s-=q.shift();if(q.length===n)o[i]=s/n}return o}
+function EMA(arr,n){const o=Array(arr.length).fill(null);const k=2/(n+1);let p=null;for(let i=0;i<arr.length;i++){const v=+arr[i]||0;p=(p==null)?v:v*k+p*(1-k);o[i]=p}return o}
+function STD(arr,n){const o=Array(arr.length).fill(null);let q=[];for(let i=0;i<arr.length;i++){const v=+arr[i]||0;q.push(v);if(q.length>n)q.shift();if(q.length===n){const m=q.reduce((a,b)=>a+b,0)/n;const s2=q.reduce((a,b)=>a+(b-m)*(b-m),0)/n;o[i]=Math.sqrt(s2)}}return o}
+function RSI(close,n=14){const o=Array(close.length).fill(null);let g=0,l=0;for(let i=1;i<close.length;i++){const ch=close[i]-close[i-1],G=ch>0?ch:0,L=ch<0?-ch:0;if(i<=n){g+=G;l+=L;if(i===n){const rs=(g/n)/((l/n)||1e-9);o[i]=100-100/(1+rs)}}else{g=(g*(n-1)+G)/n;l=(l*(n-1)+L)/n;const rs=g/(l||1e-9);o[i]=100-100/(1+rs)}}return o}
+function MACD(close,f=12,s=26,sg=9){const ef=EMA(close,f),es=EMA(close,s),m=ef.map((v,i)=>v!=null&&es[i]!=null?v-es[i]:null),signal=EMA(m.map(v=>v??0),sg),h=m.map((v,i)=>v!=null&&signal[i]!=null?v-signal[i]:null);return{macd:m,signal,hist:h}}
+function bbBands(close,n=20,k=2){const ma=SMA(close,n),sd=STD(close,n),u=ma.map((m,i)=>m!=null&&sd[i]!=null?m+k*sd[i]:null),l=ma.map((m,i)=>m!=null&&sd[i]!=null?m-k*sd[i]:null);return{ma,upper:u,lower:l}}
+function nnum(x){if(x==null)return 0;return +String(x).replace(/,/g,'').replace(/\\s+/g,'').replace(/%/g,'')||0}
+const str = (x)=> (x==null ? '' : String(x));
+const cumsum = (arr)=>{let s=0; return arr.map(v=>{s += (+v||0); return s;});};
+const safeMax = (arr)=> Math.max( ...(arr.map(v=>+v||0).filter(v=>isFinite(v)&&!isNaN(v))), 0 );
+
+function toAsc(date, ...series){
+  const N = date.length;
+  if (N < 2) return [date, ...series];
+  if (date[0] <= date[N-1]) return [date, ...series];
+  const rev = a => a.slice().reverse();
+  return [rev(date), ...series.map(rev)];
+}
+
+function idxOf(cols, primary, alts=[]){
+  const i=cols.indexOf(primary);
+  if(i>-1) return i;
+  for(const a of alts){ const j=cols.indexOf(a); if(j>-1) return j; }
+  return -1;
+}
+
+function showError(secId,msg){
+  for (const side of ['chart-price-','chart-flow-']){
+    const el = document.getElementById(side+secId);
+    if (el) el.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:13px">'+msg+'</div>';
+  }
+}
+
+// ===== 렌더링 =====
+function renderOne(secId){
+  const tag=document.getElementById('data-'+secId);
+  if(!tag){ showError(secId,'섹션 데이터가 없습니다.'); return; }
+  let j=null; try{ j=JSON.parse(tag.textContent); }catch(e){ showError(secId,'섹션 데이터 파싱 실패: '+e); return; }
+
+  const cols=(j.columns||[]).map(c=>String(c).trim());
+
+  const iDate=idxOf(cols,'일자',['\\ufeff일자','DATE','date']),
+        iOpen=idxOf(cols,'시가',['Open','open']),
+        iHigh=idxOf(cols,'고가',['High','high']),
+        iLow =idxOf(cols,'저가',['Low','low']),
+        iClose=idxOf(cols,'종가',['Close','close']),
+        iVol =idxOf(cols,'거래량',['Volume','volume']),
+        iFor =idxOf(cols,'외국인 합계',['외국인합계','외인합계']),
+        iInst=idxOf(cols,'기관 합계',['기관합계']),
+        iShortR =idxOf(cols,'공매도비중',['공매도 비중','공매도 거래량 비중','비중','(공매도)비중']),
+        iShortBR=idxOf(cols,'공매도잔고비중',['공매도 잔고 비중','공매도잔고비중(%)','공매도잔고 비중(%)','잔고비중','잔고 비중','공매도잔고비율','잔고비율']);
+
+  if([iDate,iOpen,iHigh,iLow,iClose].some(i=>i<0)){ showError(secId,'필수 컬럼 누락'); return; }
+  const rows=j.rows||[]; if(!rows.length){ showError(secId,'시계열 행이 없습니다.'); return; }
+
+  let date   = rows.map(r=>str(r[iDate]));
+  let open   = rows.map(r=>nnum(r[iOpen]));
+  let high   = rows.map(r=>nnum(r[iHigh]));
+  let low    = rows.map(r=>nnum(r[iLow]));
+  let close  = rows.map(r=>nnum(r[iClose]));
+  let vol    = (iVol>=0)? rows.map(r=>nnum(r[iVol])): rows.map(_=>0);
+  let foreign= (iFor>=0)? rows.map(r=>nnum(r[iFor])): rows.map(_=>0);
+  let inst   = (iInst>=0)? rows.map(r=>nnum(r[iInst])): rows.map(_=>0);
+  let shortR = (iShortR>=0)? rows.map(r=>nnum(r[iShortR])): rows.map(_=>0);
+  let shortBR= (iShortBR>=0)? rows.map(r=>nnum(r[iShortBR])): rows.map(_=>0);
+
+  [date, open, high, low, close, vol, foreign, inst, shortR, shortBR] =
+    toAsc(date, open, high, low, close, vol, foreign, inst, shortR, shortBR);
+
+  const ma20=SMA(close,20), ma60=SMA(close,60), ma120=SMA(close,120);
+  const bb=bbBands(close,20,2);
+  const rsi=RSI(close,14);
+  const {macd,signal,hist}=MACD(close,12,26,9);
+
+  // 차트 1: 가격/지표
+  const layout1={
+    grid:{rows:3,columns:1,pattern:'independent',roworder:'top to bottom'},
+    xaxis:{domain:[0,1], rangeslider:{visible:false}, showspikes:true, spikemode:'across'},
+    yaxis:{domain:[0.35,1.00], title:'주가 (원)', tickformat:',', showspikes:true},
+    xaxis2:{anchor:'y2', showspikes:true},
+    yaxis2:{domain:[0.18,0.30], title:'RSI', range:[0,100], tickvals:[30,70], showgrid:true},
+    xaxis3:{anchor:'y3', showspikes:true},
+    yaxis3:{domain:[0.00,0.15], title:'MACD'},
+    legend:{orientation:'h', y:1.02, x:0.5, xanchor:'center'},
+    margin:{t:40,l:60,r:40,b:30},
+    hovermode:'x unified',
+    plot_bgcolor:'#ffffff', paper_bgcolor:'#ffffff'
+  };
+
+  const traces1=[
+    {type:'candlestick',x:date,open,high,low,close,name:'주가',
+     increasing:{line:{color:'#ef4444'}}, decreasing:{line:{color:'#3b82f6'}} },
+    {type:'scatter',mode:'lines',x:date,y:ma20,name:'MA20', line:{width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:ma60,name:'MA60', line:{width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:ma120,name:'MA120', line:{width:1.5}},
+    {type:'scatter',mode:'lines',x:date,y:bb.upper,name:'BB상단', visible:'legendonly', line:{dash:'dot', width:1}},
+    {type:'scatter',mode:'lines',x:date,y:bb.lower,name:'BB하단', visible:'legendonly', line:{dash:'dot', width:1}},
+    {type:'scatter',mode:'lines',x:date,y:rsi,name:'RSI(14)',xaxis:'x2',yaxis:'y2'},
+    {type:'bar',x:date,y:hist,name:'MACD Hist',xaxis:'x3',yaxis:'y3'},
+    {type:'scatter',mode:'lines',x:date,y:macd,name:'MACD',xaxis:'x3',yaxis:'y3'},
+    {type:'scatter',mode:'lines',x:date,y:signal,name:'Signal',xaxis:'x3',yaxis:'y3'},
+  ];
+
+  Plotly.newPlot('chart-price-'+secId, traces1, layout1, {responsive:true, displaylogo:false});
+
+  // 차트 2: 수급/공매도
+  const layout2={
+    yaxis:{title:'누적 순매수', tickformat:',', showgrid:true},
+    yaxis2:{title:'공매도 비율(%)', overlaying:'y', side:'right',
+           range:[0, Math.max(1, Math.max(...shortBR, ...shortR, 0)*1.2)]},
+    margin:{t:40,l:60,r:50,b:30},
+    hovermode:'x unified',
+    legend:{orientation:'h', y:1.08, x:0.5, xanchor:'center'},
+    plot_bgcolor:'#ffffff'
+  };
+
+  const instCum = cumsum(inst);
+  const foreignCum = cumsum(foreign);
+
+  const traces2=[
+    {type:'scatter',mode:'lines',x:date,y:instCum,   name:'기관 누적'},
+    {type:'scatter',mode:'lines',x:date,y:foreignCum,name:'외국인 누적'},
+    {type:'scatter',mode:'lines',x:date,y:shortR,    name:'공매도비중(%)',yaxis:'y2', line:{dash:'dot'}},
+    {type:'scatter',mode:'lines',x:date,y:shortBR,   name:'공매도잔고비중(%)',yaxis:'y2'},
+  ];
+
+  Plotly.newPlot('chart-flow-'+secId, traces2, layout2, {responsive:true, displaylogo:false});
+}
+
+(function main(){
+  const ids=Array.from(document.querySelectorAll('section[id]')).map(s=>s.id);
+  for(const id of ids){ try{ renderOne(id); }catch(e){ showError(id,'렌더링 오류: '+e); } }
+})();
+</script>
+
 <footer style="margin-top:40px;color:#666;font-size:12px">
   Published via GitHub Pages · Per-ticker JSON: /api/*.json
 </footer>
 </body>
-</html>"""
+</html>""")
+
+    html_doc = html_template.substitute(
+        generated=generated,
+        nav=nav,
+        sections="".join(sections) if sections else "<p>표시할 데이터가 없습니다.</p>",
+    )
+
     (docs_dir / "index.html").write_text(html_doc, encoding="utf-8")
     logging.info("index.html 생성 완료 → %s", docs_dir / "index.html")
 
