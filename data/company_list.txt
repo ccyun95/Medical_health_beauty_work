@@ -5,3 +5,4 @@ LnC_Bio,290650
 Wontech,336570
 Seers_Technology,458870
 Hugel,145020
+TnL,340570
