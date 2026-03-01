@@ -6,3 +6,4 @@ Wontech,336570
 Seers_Technology,458870
 Hugel,145020
 TnL,340570
+Micro_Digital,305090
