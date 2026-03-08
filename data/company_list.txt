@@ -2,6 +2,7 @@ Pharmaresearch,214450
 Classys,214150
 Hans_Biomed,042520
 LnC_Bio,290650
+Caregen,214370
 Wontech,336570
 Seers_Technology,458870
 Hugel,145020
